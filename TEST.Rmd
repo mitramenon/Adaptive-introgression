@@ -1,0 +1,15 @@
+---
+title: "INTROGRESS and Fold Enrichment analysis"
+author: "Mitra Menon"
+output: html_notebook
+---
+
+#BACKGROUND#
+#*Overall goal is to identify adaptively introgressed loci and determine the major environmental axis associated with adaptive introgression*#
+
+Here I utilize the regression approach implemented within `INTROGRESS` to first identify loci exhibiting exceptional patterns of introgression. These will then be subjected to a fold enrichment approach to determine if loci associated with a given environmental variable are more likely to be candidates for adaptive introgression than those associated with other environmental variables. We will focussing primarily on environmental variables that are strongly distinguished between the two hybridizing species, or those driving the niches of the two species (if you have prior information on that). 
+
+```{r}
+library(data.table)
+library(introgress)
+```
