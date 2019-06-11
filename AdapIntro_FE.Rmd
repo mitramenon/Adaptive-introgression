@@ -1,0 +1,229 @@
+---
+title: "INTROGRESS and Fold Enrichment analysis"
+author: "Mitra Menon"
+output: html_notebook
+---
+
+#BACKGROUND#
+#*Overall goal is to identify adaptively introgressed loci and determine the major environmental axis associated with adaptive introgression*#
+
+Here I utilize the regression approach implemented within `INTROGRESS` to first identify loci exhibiting exceptional patterns of introgression. These will then be subjected to a fold enrichment approach to determine if loci associated with a given environmental variable are more likely to be candidates for adaptive introgression than those associated with other environmental variables. We will focussing primarily on environmental variables that are strongly distinguished between the two hybridizing species, or those driving the niches of the two species (if you have prior information on that). 
+
+```{r}
+library(data.table)
+library(introgress)
+```
+
+#STEP 1: Prep data and run introgress (*For large number of loci this needs to be run on a computing cluster*)
+
+Load data
+```{r}
+Gdata<-fread("../snpData/IlluminaMix_3489/rawData/minor012.txt",sep="\t",header=T,data.table=F)
+Pops<-read.table("../snpData/PopInd.txt",header=T,sep="\t",stringsAsFactors = FALSE)
+parentals<-read.table("../snpData/summaryStats_3489/MAF_parentals.txt",header=T,sep="\t")
+```
+
+Due to low overall differentiation between the two species I am using, I will use a very low allele frequency difference cutoff to obtain the input loci. As states in the paper, the approach should not be biased by this. Maximising the number of loci will also help the assesment of fold enrichment.
+```{r}
+alleleFreq<-cbind(diff=abs(parentals$LP_pure-parentals$SWWP_pure),parentals)
+alleleFreq<-alleleFreq[alleleFreq$diff>0, ] 
+
+Gdata<-Gdata[ ,colnames(Gdata)%in%alleleFreq$loci]
+Gdata<-cbind(Pops,Gdata)
+Gdata<-Gdata[!(Gdata$Pop=="MESC1L"), ]
+Pops<-Pops[!(Pops$Pop=="MESC1L"), ]
+
+loci<-as.matrix(Gdata[ ,-c(1:5)])
+loci[is.na(loci)]<-"NA/NA"
+loci[loci==1]<-"A/D"
+loci[loci==0]<-"A/A"
+loci[loci==2]<-"D/D"
+```
+
+Define groups
+```{r}
+LP<-c("BCK","BU","CH","CP","HO","JEN","JV","LP","MEL","MSL","VC","COLO2L","COLO3H")
+SWWP<-c("DAV2L","ALT","HUA2H","HUA2L","SANRIT1L","BAL","BAS","CHI","EPA","ERM","GUA","GUI","SAM","TOM","VER","YAQ","CHI1H","CHI1L","CHI3","DAV1L","DAV1H","DAV2H")
+pop98<-read.table("../snpData/summaryStats_3489/bayenvOut/98PopIDs")
+
+Gdata<-cbind.data.frame(Pops,loci)
+
+P1_swwp<-Gdata[Gdata$Pop%in%SWWP, ]
+P2_lp<-Gdata[Gdata$Pop%in%LP, ]
+mixed<-Gdata[Gdata$Pop%in%pop98$V1, ]
+```
+
+Data prep for running INTROGRESS
+```{r}
+P1_swwp<-P1_swwp[ ,-c(1:5)]
+P2_lp<-P2_lp[ ,-c(1:5)]
+mixed<-cbind(Pop=mixed$Pop,Ind=mixed$PopInd,mixed[ ,-c(1:5)])
+
+P1_transpose<-t(P1_swwp)
+P2_transpose<-t(P2_lp)
+mixed_transpose<-t(mixed)
+
+
+Locus<-cbind(locus=alleleFreq$loci,type=rep("C",nrow(alleleFreq)))
+
+admixCount<-prepare.data(admix.gen=mixed_transpose,loci.data=Locus,parental1=P1_transpose,parental2=P2_transpose,pop.id=TRUE,ind.id=TRUE,fixed=FALSE,sep.rows = FALSE,sep.columns = FALSE)
+```
+
+Estimate hybrid index and interspecfic het, this is important to determine outlier loci with respect to genome wide ancestry. (*takes a long time and so save the output after it is run*)
+```{r}
+HIndex<-est.h(introgress.data = admixCount,loci.data = Locus,ind.touse = NULL,fixed = FALSE)
+head(HIndex)
+#write.table(cbind(HIndex,mixed[ ,1:2]),file="HybridIndex98Pops.txt",row.names=F,quote=F,sep="\t")
+
+int.het<-calc.intersp.het(introgress.data=admixCount)
+```
+
+Now, conduct genomic cline analysis using the parametric approach since the SNPs used don't exhibit fixed differences (*Takes a long time and needs to be run on the cluster*)
+
+```{r}
+Gclines_para<-genomic.clines(introgress.data = admixCount,hi.index = HIndex,loci.data = Locus,
+                               method="parametric",sig.test=TRUE,loci.touse=NULL,ind.touse=NULL)
+```
+
+Write output files 
+```{r}
+write.table(Gclines_para$Summary.data, file="Summ_para1000.txt",quote=FALSE, sep="\t")
+write.table(Gclines_para$Fitted.AA,file="HomoP1_para1000.txt",sep="\t",quote=F)
+write.table(Gclines_para$Fitted.aa,file="HomoP2_para1000.txt",sep="\t",quote=F)
+write.table(Gclines_para$Neutral.AA,file="HomoP1_CIpara1000.txt",sep="\t",quote=F)
+write.table(Gclines_para$Neutral.aa,file="HomoP2_CIpara1000.txt",sep="\t",quote=F)
+write.table(Gclines_para$Quantiles,file="Quantile_para1000.txt",sep="\t",quote=F)
+```
+
+The parametric approach is prone to false positives, specifically due to the large number of tests done, we will conduct a P.val correction and use only loci that pass p val threshold.
+```{r}
+Summ<-read.table("../snpData/summaryStats_3489/introgress/all1000reps/Summ_para1000.txt",header=T,sep="\t")
+
+num<-0.05/nrow(Summ) #Bonferonni correction
+SummBH<-Summ[Summ$P.value<num, ]
+```
+
+Across all individuals we will only retain loci that have passed the Bonferonni correction. Since we have estimates for each individual, we will then classify the loci within an individual as having excess ancestry from LP using the CI estimates.
+```{r}
+LPci<-fread("../snpData/summaryStats_3489/introgress/allLoci/HomoP2_CIpara1000.txt",sep="\t",data.table=F)
+LPout<-fread("../snpData/summaryStats_3489/introgress/allLoci/HomoP2_para1000.txt",sep="\t",data.table=F)
+
+LP_upper<-LPci[ ,1:ncol(LPout)]
+
+
+ExcessLP<-matrix(nrow = nrow(LPout),ncol=950)
+
+for (c in 2:ncol(LPout)){
+  n<-c-1
+  for (r in 1:nrow(LPout)){
+    ExcessLP[r,n]<-ifelse(LPout[r,c]>LP_upper[r,c],1,0)
+  }
+}
+
+rownames(ExcessLP)<-LPout$V1
+colnames(ExcessLP)<-colnames(LPout)[2:ncol(LPout)]
+ExcessLP_out<-ExcessLP[rownames(ExcessLP)%in%SummBH$locus, ]
+
+```
+
+After assigning introgressed loci as 1 and non-introgressed as 0, we can add them across all individuals to determine what proportion of times it was introgressed across the hybrid zone. We can then use a cutoff (mostly arbitary) to classify a loci as significantly introgressed. This arbitary cutoff for here is set as 0.2 (20% of individiuals) and was assessed through a series of cutoffs being subjected to downstream analysis, all of which gave similar results.
+```{r}
+ExcessLP_out<-apply(ExcessLP,1,function(X) return(sum(X)/length(X)))
+ExcessLP_out2<-ExcessLP_out[ExcessLP_out>0.20]
+```
+
+#STEP 2: Determining whether the introgressed loci are adaptive.
+Here we will utilize the outliers identified through GEA (bayenv in my case) and intersect them with the introgressed loci. Since the number of outliers loci vary across environmental variables, we will utilize a permutation approach to assess the significance of fold enrichment.
+
+Load GEA outliers SNPs
+```{r}
+clim<-list.files("../snpData/summaryStats_3489/bayenvOut/clim/convergence/",full.names = T,pattern="Overlap")
+Soil<-list.files("../snpData/summaryStats_3489/bayenvOut/Soil/convergence/",full.names = T,pattern="Overlap")
+outliers<-c(clim,Soil)
+
+
+filesBF<-vector("list",length(outliers))
+
+for (f in 1:length(filesBF)){
+  
+  df<-read.table(outliers[f],header=T,sep="\t")
+  df<-df[ ,1:5]
+  filesBF[[f]]<-df
+}
+
+files<-list.files("../snpData/summaryStats_3489/bayenvOut/clim/convergence/",pattern="Overlap")
+files<-c(files,list.files("../snpData/summaryStats_3489/bayenvOut/Soil/convergence/",pattern="Overlap"))
+varID<-sapply(strsplit(files,"Overlap1_3chainConvg"),"[",2)
+varID<-sapply(strsplit(varID,".txt"),"[",1)
+
+
+names(filesBF)<-varID
+remove<-c("Elevation" ,"Latitude","Longitude")
+outliers<-filesBF[!(names(filesBF)%in%remove)]
+```
+
+Some simple manipulation to reatain only the SNPs used in `INTROGRESS`
+```{r}
+outliers2<-lapply(outliers,function(df) df[df$loci%in%LPout$V1, ]) #NULL SET
+BF_gClines<-lapply(outliers2,function(df) return(df[df$loci%in%names(ExcessLP_out2), ])) #SHARED SET
+BF_gClinesID<-unlist(lapply(BF_gClines,function(df) nrow(df)))
+```
+
+Estimating fold change for each environmental variable
+```{r}
+Nr<-BF_gClinesID/unlist(lapply(outliers2,function(df) nrow(df)))
+Dn<-length(ExcessLP_out2)/nrow(LPout)
+
+FC<-Nr/Dn
+```
+
+*Function for randomization to obtain null distribution of FC*
+
+Takes 4 inputs:
+
+`df` is a dataframe of bayenv outliers, where nrow = total outliers
+`loci` is a character vector of IDs of all snps used in introgress analysis
+`Int` total number of loci identified as significantly introgressed from LP in STEP 1
+`R` number of bootstrap replicates to run
+
+```{r}
+randFC<-function(df,loci,Int,R){
+
+  boot<-NULL
+  for(i in 1:R){
+    
+    BFrand<-sample(loci,nrow(df),replace = F)
+    PFrand<-sample(loci,Int,replace = F)
+    shared<-length(PFrand[PFrand%in%BFrand])
+    
+    boot[i]<-(shared/length(BFrand))/(length(PFrand)/length(loci))
+  }
+
+  return(boot)
+}
+
+```
+
+The actual test
+```{r}
+ID<-LPout$V1
+Int<-length(ExcessLP_out2)
+
+
+FCrandOut<-lapply(outliers2,function(df) return(randFC(df,ID,Int,10000)))
+```
+
+Check which variables have observed FC outside the 99th percentile of null
+```{r}
+
+for (i in 1:length(FCrandOut)){
+  Env<-names(FCrandOut)[i]
+  emp<-FCrandOut[[Env]]
+  if (quantile(emp,probs = c(0.999))<=FC[[Env]]){
+    cat("variable",Env,"is significantly enriched","\n")
+  }
+  
+}
+
+```
+

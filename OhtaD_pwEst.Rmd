@@ -21,22 +21,17 @@ The expectation is that Dis will likely be higher for loci that are adaptively i
 library(data.table)
 library(ohtadstats)
 library(geosphere)
-```
-
-Load SNP dataset
-```{r}
-SNPs<-fread("../snpData/IlluminaMix_3489/rawData/minor012.txt",sep="\t",data.table=F)
-PopInd<-read.table("../PopInd.txt",header=T,sep="\t")
-SNPs<-cbind(PopInd,SNPs)
-Pop98_mono<-read.table("../snpData/summaryStats_3489/monomorphic_periphery.txt",sep="\t",header=T)
-pops98<-read.table("../snpData/summaryStats_3489/98PopIDs")
-
-SNPs_98<-SNPs[SNPs$Pop%in%pops98$V1, ]
-SNPs_98<-SNPs_98[ ,!(colnames(SNPs_98)%in%Pop98_mono$location)]
+library(PopGenReport)
+library(plyr)
+library(ggplot2)
+library(reshape)
 ```
 
 
-#Function generation: 5 inputs
+#Function generation: 
+#*Function 1*#
+Estimating LD and geographical distance: 5 inputs
+
 *df* is a dataframe containing at the very least a column with the name of the outlier loci (labeled as loci) for that given envVariable
 
 *snps* is a large dataframe containing information for all loci, population ID (labeled as Pop)
@@ -84,6 +79,130 @@ for(i in 1:ncol(pairs)) {
 return(dist_pairs)
 }
 ```
+
+#*Function 2*#
+Multiple matrix regression: 2 inputs
+
+*data* is a large dataframe that contains PW comparisions for dis, dst, geoDist, climDist for all pops for a given environmental variable. Columns are labeled as DIS, DST, GeodIST and climDIFF.
+
+*Oest* is a character indicating whether to conduct the regression for DIS or DST
+
+The approach uses the function `lgrMMRR` to conduct the matrix regression. Overall 3 matrix regressions are performed for each `data`: Full model, pureClim and pureGeo. Since `lgrMMRR` does not directly estimate pure effects, these have to be obtained through a simple linear regression that partials out the effect of one variable and the residuls from this can then be used for the pure effect models. The R2 from the three models are finally used to estimate the amount of effect confounded between Geography and climate for each Ohta's D component.
+
+
+```{r pressure, echo=FALSE}
+MatRegOhtD_partial<-function(data,Oest){
+
+  ########First, conduct just a normal linear regression to partition out the effect of geo and clim
+  print(Oest)
+  
+  df<-data[!(is.na(data[,Oest])), ] #remove missing data from the original df
+  climMod<- lm(df[ ,Oest] ~ df$climDIFF)
+  GeoMod<- lm(df[ ,Oest]~ df$GeodIST)
+  
+  df<-data.frame(P1=df$P1,P2=df$P2,resClim=climMod$residuals,resGeo=GeoMod$residuals)
+  
+  #This data manipulation is needed to keep NA where we have no value for DIS or DST and maintain the pw order needed for the matrix regression
+  df$comb<-paste(df$P1,df$P2,sep=":")
+  data$comb<-paste(data$P1,data$P2,sep=":")
+  combined<-join(data,df,by="comb",type="left") #keep all 4753 pairs
+
+  #generate matrices
+  
+  matD<-matrix(NA,nrow=98,ncol=98)
+  matD[lower.tri(matD)] <- combined[ ,Oest]
+  matD[upper.tri(matD)] <- combined[ ,Oest]
+  diag(matD)<-0
+   #obtain cell index no. to change missing values to NA for matGeo and matClim later
+  missing<-which(is.na(matD))
+  
+  
+  matRes<-matrix(NA,nrow=98,ncol=98)
+  matRes[lower.tri(matRes)] <- combined$resClim
+  matRes[upper.tri(matRes)] <- combined$resClim
+  diag(matRes)<-0
+  
+  matRes_geo<-matrix(NA,nrow=98,ncol=98)
+  matRes_geo[lower.tri(matRes_geo)] <- combined$resGeo
+  matRes_geo[upper.tri(matRes_geo)] <- combined$resGeo
+  diag(matRes_geo)<-0
+  
+  matGeo<-matrix(NA,nrow=98,ncol=98)
+  matGeo[lower.tri(matGeo)] <- data$GeodIST
+  matGeo[upper.tri(matGeo)] <- data$GeodIST
+  diag(matGeo)<-0
+  #use the cell index no. to change missing values to NA here and in matClim
+  matGeo[missing]<-NA 
+  
+  matclim<-matrix(NA,nrow=98,ncol=98)
+  matclim[lower.tri(matclim)] <- data$climDIFF
+  matclim[upper.tri(matclim)] <- data$climDIFF
+  diag(matclim)<-0
+  matclim[missing]<-NA
+
+  #need to convert to list format to run the function
+  #the clim/cost matrix needs to be a list object
+  GLC_pure<-vector("list",4)
+  names(GLC_pure)<-c("resClim","euc","clim","resGeo")
+  GLC_pure[[1]]<-matRes
+  GLC_pure[[2]]<-vector("list",1)
+  GLC_pure[[3]]<-vector("list",1)
+  GLC_pure[[4]]<-matRes_geo
+  GLC_pure$clim[[1]]<-matclim 
+  names(GLC_pure$clim)[1]<-"Env" 
+  GLC_pure$euc[[1]]<-matGeo 
+  names(GLC_pure$euc)[1]<-"Geo" 
+  
+  GLC<-vector("list",3)
+  names(GLC)<-c("oht","euc","clim")
+  GLC[[1]]<-matD
+  GLC[[2]]<-matGeo
+  GLC[[3]]<-vector("list",1)
+  GLC$clim[[1]]<-matclim 
+  names(GLC$clim)[1]<-"Env" 
+
+
+  #conduct 3 regressions, two for pure effects and 1 for the full model
+  MMRout<-vector("list",2)
+
+    Mregress_pureClim<-lgrMMRR(GLC_pure$resGeo, GLC_pure$clim, nperm=999)
+    Mregress_pureGeo<-lgrMMRR(GLC_pure$resClim,  GLC_pure$euc, nperm=999)
+    Mregress_total<-lgrMMRR(GLC$oht,  GLC$clim,GLC$euc, nperm=999)
+    rownames(Mregress_total$mmrr.tab)<-as.character(Mregress_total$mmrr.tab$layer)
+    rownames(Mregress_pureClim$mmrr.tab)<-as.character(Mregress_pureClim$mmrr.tab$layer)
+    rownames(Mregress_pureGeo$mmrr.tab)<-as.character(Mregress_pureGeo$mmrr.tab$layer)
+
+    #PULL OUT EFFECTS, pval and model r2
+  climOut<-Mregress_total$mmrr.tab["Env", c(2,4)]
+  GeoOut<-Mregress_total$mmrr.tab["Euclidean" ,c(2,4) ]
+  MMRout[[1]]<-unlist(c(unlist(Mregress_total$mmrr.tab$r2[1]),climOut,GeoOut))
+  
+  climPure<-Mregress_pureClim$mmrr.tab["Env", c(2,4)]
+  GeoPure<-Mregress_pureGeo$mmrr.tab["Geo" , c(2,4)]
+  MMRout[[2]]<-unlist(c(unlist(Mregress_pureClim$mmrr.tab$r2[1]),
+                        unlist(Mregress_pureGeo$mmrr.tab$r2[1]),climPure,GeoPure))
+  
+  return(MMRout)
+  
+  
+}
+
+```
+
+#*Start of actual analysis, first estimating PW ohta's D and geographical distance and climate distance#*
+
+Load SNP dataset
+```{r}
+SNPs<-fread("../snpData/IlluminaMix_3489/rawData/minor012.txt",sep="\t",data.table=F)
+PopInd<-read.table("../PopInd.txt",header=T,sep="\t")
+SNPs<-cbind(PopInd,SNPs)
+Pop98_mono<-read.table("../snpData/summaryStats_3489/monomorphic_periphery.txt",sep="\t",header=T)
+pops98<-read.table("../snpData/summaryStats_3489/98PopIDs")
+
+SNPs_98<-SNPs[SNPs$Pop%in%pops98$V1, ]
+SNPs_98<-SNPs_98[ ,!(colnames(SNPs_98)%in%Pop98_mono$location)]
+```
+
 
 Load in the outliers obtained from bayenv analysis and remove lat-long-elv from the list
 ```{r}
@@ -134,7 +253,7 @@ EnvOhtD<-lapply(outliers93,function(df) return(OhtDPW(df,SNPs_98,pops98,coordPop
 ```
 
 
-#Now, to conduct correlations or matrix regressions we need to obtain pw estimate for the climatic variables making sure the same pairs are used. 
+*Now, to conduct correlations or matrix regressions we need to obtain pw estimate for the climatic variables making sure the same pairs are used*
 
 Load in the clim data and subset it only for the 98 hybrid zone pops
 ```{r}
@@ -182,7 +301,36 @@ for (i in 1:length(EnvOhtD)){
 ```
 
 
-Utilize this output to conduct correlation tests or matrix regressions. 
+#*Utilize this output to conduct matrix regressions*#
+
+For each environemtal variable used in the multiple matrix regression approach here, we will have a dataframe of 4753 rows (corresponding to 98C2 comparisions, where 98 is the total number of populations) and columns corresponding to estimates of dst, dis, absolute climate difference and geographical distance. All the data we need for this step is stored in the list `EnvOhtD`
+
+Run the matrix regression, telling it which estimator to use as the response variable
+```{r}
+MDst_med<-lapply(filesOhta,function(X) return(MatRegOhtD_partial(data = X,Oest = "DST")))
+MDis_med<-lapply(filesOhta,function(X) return(MatRegOhtD_partial(data = X,Oest = "DIS")))
+
+```
+
+Compile the output, example is shown only for Dst. Dis would be similar
+```{r}
+MatRegDst<-data.frame(matrix(NA,nrow = length(filesOhta),ncol=4))
+colnames(MatRegDst)<-c("R2Full","R2pureClim","R2pureGeo","Confound")
+
+for (i in 1:length(MDst_med)){
+  
+  df_full<-MDst_med[[i]][[1]]
+  df_partial<-MDst_med[[i]][[2]]
+  
+  MatRegDst[i,1]<-df_full[1]
+  MatRegDst[i,2]<-df_partial[1]
+  MatRegDst[i,3]<-df_partial[2]
+  
+}
+
+MatRegDst<-cbind(var=names(MDst_med),MatRegDst)
+MatRegDst$Confound<-MatRegDst$R2Full-(MatRegDst$R2pureClim+MatRegDst$R2pureGeo)
+```
 
 
 
