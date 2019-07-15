@@ -3,62 +3,6 @@
 
 <title>INTROGRESS and Fold Enrichment analysis</title>
 
-.kable-table table>thead>tr>th {
-  border: none;
-  border-bottom: 2px solid #dddddd;
-}
-
-.kable-table table>thead {
-  background-color: #fff;
-}
-</style>
-
-
-<div class="container-fluid main-container">
-
-<!-- tabsets -->
-<script>
-$(document).ready(function () {
-  window.buildTabsets("TOC");
-});
-</script>
-
-<!-- code folding -->
-<style type="text/css">
-.code-folding-btn { margin-bottom: 4px; }
-</style>
-<script>
-$(document).ready(function () {
-  window.initializeSourceEmbed("AdapIntro_FE.Rmd");
-  window.initializeCodeFolding("show" === "show");
-});
-</script>
-
-
-
-
-
-
-<div class="fluid-row" id="header">
-
-<div class="btn-group pull-right">
-<button type="button" class="btn btn-default btn-xs dropdown-toggle" data-toggle="dropdown" aria-haspopup="true" aria-expanded="false"><span>Code</span> <span class="caret"></span></button>
-<ul class="dropdown-menu" style="min-width: 50px;">
-<li><a id="rmd-show-all-code" href="#">Show All Code</a></li>
-<li><a id="rmd-hide-all-code" href="#">Hide All Code</a></li>
-<li role="separator" class="divider"></li>
-<li><a id="rmd-download-source" href="#">Download Rmd</a></li>
-</ul>
-</div>
-
-
-
-<h1 class="title toc-ignore">INTROGRESS and Fold Enrichment analysis</h1>
-<h4 class="author"><em>Mitra Menon</em></h4>
-
-</div>
-
-
 <!-- rnb-text-begin -->
 <div id="background" class="section level1">
 <h1>BACKGROUND</h1>
