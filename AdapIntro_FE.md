@@ -232,9 +232,9 @@ FC&lt;-Nr/Dn</code></pre>
   boot&lt;-NULL
   for(i in 1:R){
     
-    BFrand&lt;-sample(loci,nrow(df),replace = F)
-    PFrand&lt;-sample(loci,Int,replace = F)
-    shared&lt;-length(PFrand[PFrand%in%BFrand])
+    BFrand<-sample(loci,nrow(df),replace = F)
+    PFrand<-sample(loci,Int,replace = F)
+    shared<-length(PFrand[PFrand%in%BFrand])
     
     boot[i]<-(shared/length(BFrand))/(length(PFrand)/length(loci))
   }
