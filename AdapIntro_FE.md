@@ -236,7 +236,7 @@ FC&lt;-Nr/Dn</code></pre>
     PFrand&lt;-sample(loci,Int,replace = F)
     shared&lt;-length(PFrand[PFrand%in%BFrand])
     
-    boot[i]&lt;-(shared/length(BFrand))/(length(PFrand)/length(loci))
+    boot[i]<-(shared/length(BFrand))/(length(PFrand)/length(loci))
   }
 
   return(boot)
