@@ -1,0 +1,364 @@
+---
+title: "LD network analysis"
+output: html_notebook
+author: "Mitra menon"
+date: "12/11/2018"
+last modified: "19/01/2020"
+---
+
+#BACKGROUND 
+This script will conduct the LD network analysis following the approach listed in Following method from [Kemppainen et al. 2015] (https://onlinelibrary.wiley.com/doi/pdf/10.1111/1755-0998.12369).
+
+I use this script to detect SNPs exhibiting outstanding association in a network, even after controlling for the background level of LD expected under ongoing and recent introgression. These clusters of SNPs are likely indicative of those that are adaptively introgressed. I identify what proportion of these SNPs were classified as outliers in GEA and which environmental axis they were associated with. 
+
+Load libraries
+```{r}
+library(genetics)
+library(dplyr)
+library(data.table)
+library(reshape2)
+library(LDna)
+library(knitr)
+```
+
+
+```{r setup}
+    knitr::opts_knit$set(root.dir = normalizePath("~/Desktop/Google Drive/Chapter2/scripts/"))
+```
+
+
+#STEP 1: 
+Data preparation to get 1000 sets of LD matrix, each with equal number of neutral and GEA outlier SNPs
+
+Load in sets of outlier SNPs detected from GEA using script `bayenv_git.R`
+```{r}
+
+clim<-list.files("convergence_clim",full.names = T,pattern="Overlap")
+Soil<-list.files(".convergence_soil",full.names = T,pattern="Overlap")
+outliers<-c(clim,Soil)
+
+
+filesBF<-vector("list",length(outliers))
+
+for (f in 1:length(filesBF)){
+  
+  df<-read.table(outliers[f],header=T,sep="\t")
+  df<-df[ ,1:5]
+  filesBF[[f]]<-df
+}
+
+#just getting variable names here
+files<-list.files("convergence_clim",pattern="Overlap")
+files<-c(files,list.files("convergence_soil",pattern="Overlap"))
+varID<-sapply(strsplit(files,"Overlap1_3chainConvg"),"[",2)
+varID<-sapply(strsplit(varID,".txt"),"[",1)
+
+
+names(filesBF)<-varID
+remove<-c("Elevation" ,"Latitude","Longitude")
+BFoutliers<-filesBF[!(names(filesBF)%in%remove)]
+
+#add variable name next, this will be useful while generating summary stats latter
+for (l in 1:length(BFoutliers)){
+  ID<-names(BFoutliers)[l]
+  BFoutliers[[l]]<-cbind(BFoutliers[[l]],var=rep(ID,nrow(BFoutliers[[l]])))
+}
+
+
+
+OutlierID<-do.call(rbind,BFoutliers)
+outVas<-split(OutlierID,OutlierID$loci)
+
+#Just doing this because outlier SNPs are shared between env variables and I would like to retain that identify for later
+outVas<-lapply(outVas, function(X) return(paste(unlist(X[ ,"var"]),collapse=",")))
+outVas<-do.call(rbind,outVas)
+OutlierID<-data.frame(loci=rownames(outVas),Var=outVas[ ,1])
+OutlierID$loci<-as.character(OutlierID$loci)
+
+
+```
+
+Obtain several sets of neutral SNPs, each equal to the number identified as unique outliers, and making sure they are proportionate to the MAF bins represented in the outlier data. This is important for LDnr to account for elevated background LD and avoid false positives.
+
+Bin all SNPs by MAF, but remove SNPs that were identified as outliers. 
+```{r}
+
+maf98<-read.table("MAF98Pops_biallelicSNPs.txt",header=T,sep="\t")
+binMAF<-data.frame(matrix(nrow = nrow(maf98),ncol = 1))
+colnames(binMAF)<-"binMAF"
+
+test<-cbind(maf98,binMAF)
+
+maf<-0
+b<-1
+
+while (maf<=0.60){
+  for ( i in 1:nrow(test)){
+    if (test[i,"MAF"]<=maf){
+      #implemnting a nested if to change bin value only if it is NA and prevent overwriting
+      if (is.na(test[i,"binMAF"])){ 
+        test[i,"binMAF"]<-b
+      }
+    }
+  }
+  maf<-maf+0.01 
+  b<-b+1
+}
+
+head(test)
+range(test$binMAF)
+table(test$binMAF)
+
+
+SNPs98_neutral<-test[!(test$loci%in%OutlierID$loci), ] 
+#generate a list based on bin numbers so we can sample from each individually to be representative of the actual outlier set
+binsGlobal<-split(SNPs98_neutral,f = SNPs98_neutral$binMAF)
+```
+
+Only retain bins into which outliers fall
+```{r}
+OutlierID<-merge(test,OutlierID,by="loci")
+binOutliers<-data.frame(table(OutlierID$binMAF))
+binOutliers$Var1<-as.character(binOutliers$Var1)
+
+#get proportion and subset to keep only bins present in the outlier set
+n<-nrow(OutlierID) 
+binOutliers<-cbind(binOutliers,Prop=binOutliers$Freq/n)
+head(binOutliers)
+binsNULL<-binsGlobal[binOutliers$Var1] 
+```
+
+Now obtain several replicate set of neutral SNPs 
+```{r}
+#if num of loci for a bin were lower than the proportion for outliers use all loci in that bin
+
+boot<-vector("list",100) #list for the replicates
+empList<-vector("list",nrow(binOutliers)) #list for the bins
+
+outDIR<-paste0(getwd(),"/LDnrboot")
+dir.create(outDIR)
+  
+for (r in 1:length(boot)){
+  
+  for (i in 1:length(binsNULL)){
+    
+    set<-binsNULL[[i]]
+     N<-binOutliers[i,"Prop"]*nrow(SNPs98_neutral)
+     
+    if(N>nrow(set)){
+      cat("For bin",names(binsNULL)[i],"the proportion of outliers in that bin is larger than the proportion of null SNPs","\n")
+      N<-nrow(set)
+      empList[[i]]<-set[sample(nrow(set),size = N,replace = FALSE), ] 
+    }else{
+      empList[[i]]<-set[sample(nrow(set),size = N,replace = FALSE), ] 
+    }
+  }
+  boot[[r]]<-do.call(rbind,empList)
+  boot[[r]]<-rbind(boot[[r]],OutlierID[ ,1:3]) #neutral + 500 outlier snps
+  
+ write.table(boot[[r]],file=paste0(outDIR,"/forLDboot",r), sep="\t",row.names = F,quote = F)
+  
+}
+
+
+```
+
+Now we will estimate pwLD for all loci in these replicate sets using the `genetics` package in R. This step is quite time consuming and hence needs to be done on a cluster.I usually split this into 100 different scripts, one for each replicate.
+
+*THIS IS THE GENERAL R script that will be submitted through the grid engine system, one script per input file*
+The output from running several of these jobs is provided in figshare doi: 10.6084/m9.figshare.c.5130104
+```{r}
+
+library(genetics)
+library(data.table)
+
+SNPs_98<-fread("SNPs_98.txt",sep="\t",header=T,data.table=F)
+ldDF<-read.table("LD/forLDnrboot1.txt",sep="\t",header=T)
+
+#ldDF is a dataframe that contains all the SNPs to be used for estimating pw LD
+#this set was generated using MAF bins that were matched propotionate to the ones in the outlier dataset. It contains neutral + outlier snps
+
+
+forLD<-as.matrix(SNPs_98[ ,colnames(SNPs_98)%in%ldDF$loci])
+forLD[forLD==0]<-"A/A"
+forLD[forLD==1]<-"A/T"
+forLD[forLD==2]<-"T/T"
+
+formated<-makeGenotypes(forLD)
+gLD<-LD(formated)
+LDmat<-gLD$`R^2`
+
+write.table(LDmat,file="LD/outputs/LDest1.txt",sep="\t",row.names=F,quote=F)
+
+
+```
+
+Then use bash to submit the above script on a gridEngine.(*NOT SHOWN HERE*)
+
+#STEP 2:
+
+Once done, we will build the LD clustering tree on a couple of them to check what parameters are appropriate for our dataset.
+To determine `min.edges`, we pick the value near which the clusters detected don't change much. (approx. 1-10% of no. of loci)
+As the value of `phi` , when it is reduced the threshold for being classifed an OC is lowered.To determine appropriate `phi` examine the summary and look at COC and SOC, specifically those that appear nested in the tree. If the SOC has higher LD for fewer no of SNPs, then choose to incr `phi`.Use `plotLDnetwork` to explore this. 
+This process will depend on properties of your genome, how the SNPs were captured and specifics of the species (like mating system and general patterns of population structure).
+
+Whatever Emin and phi is chosen will be used for the rest of the replicate sets too.
+
+```{r}
+ldFiles<-list.files("LD/outputs/",full.names = T)
+ldFiles<-lapply(ldFiles,function(df) return(fread(df,data.table=F,sep="\t")))
+names(ldFiles)<-list.files("LD/outputs/")
+
+test<-ldFiles[[6]] #this needs to be repeated for a couple different LDsets to arrive at a consensus
+rownames(test)<-colnames(test)
+
+#build a linkage clustering tree
+ldna<-LDnaRaw(test)
+dim(ldna$clusterfile) 
+head(ldna$stats)
+```
+
+Some basic plotting to look at LD region of major cluster merging.
+```{r}
+par(mfrow=c(1,3))
+plotLDnetwork(LDmat = ldna,option=1,threshold=0.15)
+plotLDnetwork(LDmat = ldna,option=1,threshold=0.07)
+plotLDnetwork(LDmat = ldna,option=1,threshold=0.05)
+```
+
+More plotting & summaries across various parameter sets
+```{r}
+par(mfcol=c(1,2))
+clusters1<-extractClusters(ldna,min.edges = 9,phi = 2,plot.tree = TRUE,plot.graph = TRUE,rm.COCs = FALSE)
+clusters1
+
+par(mfcol=c(1,2))
+clusters2<-extractClusters(ldna,min.edges = 7,phi = 2,plot.tree = TRUE,plot.graph = TRUE,rm.COCs = FALSE)
+clusters2
+
+summ1<-summaryLDna(ldna,clusters1,test) #works when there are atleast 2 clusters
+summ1
+
+
+par(mfrow=c(2,3))
+plotLDnetwork(ldna,test,option = 2,clusters = clusters1,summary = summ1)
+
+```
+
+#STEP 3: Downstream analyses
+Determining how often a GEA outlier is identified as an outlier in the LD analysis.
+Using only SOC to avoid redudancy
+
+```{r}
+summSTAT<-as.data.frame(matrix(NA,nrow=nrow(OutlierID),ncol=4)) 
+colnames(summSTAT)<-c("loci","PropOut","Mld_clust","Variable")
+summSTAT[ ,1]<-OutlierID$loci
+summSTAT[ ,4]<-OutlierID$Var 
+
+#some of the LD files may not meet the threshold and I just ended up not using them
+remove<-c("LDest37.txt","LDest38.txt","LDest40.txt","LDest64.txt","LDest96.txt")
+ldFiles2<-ldFiles[!(names(ldFiles)%in%remove)]
+
+for (i in 1:length(ldFiles2)){
+  test<-ldFiles2[[i]]
+  rownames(test)<-colnames(test)
+  
+  
+  ldna<-LDnaRaw(test)
+  
+  clusters1<-extractClusters(ldna,min.edges = 9,phi = 2,plot.tree = FALSE,plot.graph = FALSE,rm.COCs = TRUE)
+
+  #pull out the clusters
+  outliersLD<-unlist(lapply(clusters1,function(L) return(OutlierID[OutlierID$loci%in%L, "loci"])))
+  
+  for (s in 1:nrow(summSTAT)){
+    loci<-as.character(OutlierID[s,"loci"])
+
+    propOut<-ifelse(loci%in%outliersLD,1,0)
+    
+    summSTAT[s,2]<-sum(summSTAT[s,2],propOut,na.rm = TRUE)
+  }
+  
+}
+
+
+summSTAT<-summSTAT[order(summSTAT$PropOut,decreasing = T), ]
+```
+
+Determining how often sets of outlier snps occur together for each env category per replicate
+
+*Function takes one input, a dataframe containing the name of the outlier loci in  a column labelled `loci`*
+*It needs a list file that holds all the bootstrap replicates*
+
+```{r}
+sets<-function(dfOut){
+  
+  loci<-as.character(dfOut$loci)
+  
+  comp<-seq(3,nrow(dfOut),by=1) #pairs
+  
+  summSTAT<-as.data.frame(matrix(NA,nrow=length(comp),ncol=3))
+  colnames(summSTAT)<-c("setN","PropClust","Mld_clust")
+  summSTAT$setN<-comp
+  
+  counter<-NULL #needed to count the total number of clusters across all replciates of LD
+
+  ##Loop through all bootstrap replicates of the pwLD files 
+  for (i in 1:length(ldFiles2)){
+    test<-ldFiles2[[i]]
+    rownames(test)<-colnames(test)
+  
+    ldna<-LDnaRaw(test)
+    clusters1<-extractClusters(ldna,min.edges = 9,phi = 2,plot.tree = FALSE,plot.graph = FALSE,rm.COCs = TRUE)
+    
+    counter<-sum(c(counter,length(clusters1)))
+   
+    
+###Assessing the clusters obtained from each ldBoot to determine how many are shared with a specific bayenv var set#
+    for (c in 1:length(clusters1)){
+      
+        
+        dataLD<-clusters1[[c]]
+        
+        for (n in 1:nrow(summSTAT)){
+          number<-summSTAT[n,1]
+          
+          #get number of times x outlier loci are present in the same cluster
+          bayLoci<-dataLD[dataLD%in%loci]
+      
+          prop<-ifelse(length(bayLoci)>=number,1,0)
+          summSTAT[n,2]<-sum(c(prop,summSTAT[n,2]),na.rm = TRUE)
+          
+          #get Median
+          bayMD<-as.matrix(test[rownames(test)%in%bayLoci,colnames(test)%in%bayLoci])
+          Md<-ifelse(length(bayLoci)>=number,median(bayMD,na.rm=TRUE),0)
+          summSTAT[n,3]<-median(c(Md,summSTAT[n,3]),na.rm = TRUE)
+        }
+
+    }
+  }
+  summSTAT[,2]<-summSTAT[,2]/counter
+    return(summSTAT)
+    
+  }
+  
+
+```
+
+Run the function `sets` for all 93 ENV variables and remove files that have no outliers at cutoff of 9 for Emin.
+Then pull out sets of shared SNPs. I am only doing this for a max of 6 shared SNPs, because the pattern is quite clear and beyond 6 there are few sharings.
+```{r}
+OutDF<-lapply(BFoutliers,function(df) return(sets(df)))
+names(OutDF)<-names(outliers)
+
+set3<-unlist(lapply(OutDF,function(df) return(df[1,2])))
+set4<-unlist(lapply(OutDF,function(df) return(df[2,2])))
+set5<-unlist(lapply(OutDF,function(df) return(df[3,2])))
+set6<-unlist(lapply(OutDF,function(df) return(df[4,2])))
+
+set3456<-data.frame(var=names(OutDF),set3,set4,set5,set6)
+rownames(set3456)<-NULL
+set3456<-set3456[order(set3456$set3,decreasing = T), ]
+```
+
+
